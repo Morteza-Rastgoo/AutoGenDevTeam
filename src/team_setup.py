@@ -9,12 +9,13 @@ load_dotenv()
 # Remote connection settings
 REMOTE_HOST = os.getenv('REMOTE_HOST')
 REMOTE_USER = os.getenv('REMOTE_USER')
-SSH_PORT = 22
+SSH_PORT = int(os.getenv('SSH_PORT', '22'))
+OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL')
 
 # Ollama configuration
 config_list = [{
     'model': 'ollama/codellama',
-    'base_url': f'http://{REMOTE_HOST}:11434/v1',
+    'base_url': OLLAMA_BASE_URL,
     'api_key': ''  # Ollama doesn't require API key
 }]
 
@@ -67,4 +68,11 @@ groupchat = GroupChat(
     max_round=50
 )
 
-manager = GroupChatManager(groupchat=groupchat) 
+manager = GroupChatManager(groupchat=groupchat)
+
+if __name__ == "__main__":
+    # Start the conversation with a project initialization
+    user_proxy.initiate_chat(
+        manager,
+        message="Let's start the development project. First, let's define the requirements and architecture."
+    ) 
