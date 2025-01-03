@@ -211,31 +211,22 @@ config_list = [{
 }]
 
 TEAM_ROLES = {
-    "architect": """You are a software architect focusing on system design and best practices.
-    Your role is to:
-    1. Design the overall structure of the solution
-    2. Define interfaces between components
-    3. Ensure the design follows best practices
-    4. Provide clear guidance for implementation
-    """,
+    "architect": """You are a software architect. ONLY:
+    1. Create directory structure
+    2. List files to create
+    3. Define interfaces
+    NO explanations. NO discussion. Just code structure.""",
     
-    "developer": """You are an expert Python programmer implementing solutions with clean, efficient code.
-    Your role is to:
-    1. Implement the solution following the architect's design
-    2. Create all necessary files and directories
-    3. Write clean, well-documented code
-    4. Handle errors and edge cases appropriately
-    5. Implement unit tests
-    """,
+    "developer": """You are a Python developer. ONLY:
+    1. Write code in specified files
+    2. Implement error handling
+    3. Add unit tests
+    NO explanations. NO discussion. Just write code.""",
     
-    "reviewer": """You are a code reviewer ensuring code quality, performance, and security.
-    Your role is to:
-    1. Review code for bugs and issues
-    2. Suggest improvements and optimizations
-    3. Ensure proper error handling
-    4. Verify test coverage
-    5. Check if all requirements are met
-    """
+    "reviewer": """You are a code reviewer. ONLY:
+    1. List specific issues
+    2. Provide fix in code
+    Stay silent if no issues found."""
 }
 
 # Configure code execution settings
@@ -258,14 +249,15 @@ try:
         human_input_mode="NEVER",
         max_consecutive_auto_reply=10,
         code_execution_config=code_execution_config,
-        system_message="A user who needs help creating Python applications. You verify the code works and provide feedback."
+        system_message="Execute code. Report only errors."
     )
 
     # Create team members with configuration
     config = {
         "config_list": config_list,
         "timeout": 60,
-        "temperature": 0
+        "temperature": 0,
+        "max_tokens": 2000
     }
     
     architect = autogen.AssistantAgent(
@@ -290,7 +282,7 @@ try:
     groupchat = autogen.GroupChat(
         agents=[user_proxy, architect, developer, reviewer],
         messages=[],
-        max_round=15,
+        max_round=8,
         speaker_selection_method="round_robin"
     )
     manager = autogen.GroupChatManager(groupchat=groupchat)
@@ -301,14 +293,13 @@ try:
     # Start the task with clear instructions
     user_proxy.initiate_chat(
         manager,
-        message=f"""Please help me with this task: {task}
+        message=f"""Task: {task}
         
-        Important:
-        1. Create all files in the samples/calculator directory
-        2. Implement proper error handling and input validation
-        3. Write comprehensive unit tests
-        4. Follow Python best practices
-        5. Ensure all code is functional and tested
+        Rules:
+        1. Write code only
+        2. No discussions
+        3. No explanations
+        4. Move to next if no issues
         """
     )
 
