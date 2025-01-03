@@ -213,12 +213,84 @@ test_ollama_connection() {
     return 1
 }
 
+# Optimize Ollama configuration for maximum performance
+optimize_ollama() {
+    if ! check_remote_config; then
+        echo "Remote configuration not found. Skipping optimization."
+        return 1
+    fi
+
+    echo "Optimizing Ollama configuration..."
+    
+    # Get hardware information
+    local cpu_info=$(ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "lscpu")
+    local mem_info=$(ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "free -g")
+    local gpu_info=$(ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "nvidia-smi -L")
+    
+    # Extract CPU threads
+    local cpu_threads=$(echo "$cpu_info" | grep "^CPU(s):" | awk '{print $2}')
+    # Use 95% of available threads
+    local num_threads=$((cpu_threads * 95 / 100))
+    
+    # Extract total memory in GB
+    local total_mem=$(echo "$mem_info" | awk '/^Mem:/ {print $2}')
+    # Calculate context size based on available memory (75% of total)
+    local ctx_size=$((total_mem * 1024 * 3 / 4))
+    
+    # Check if GPU is available
+    local gpu_config=""
+    if [ ! -z "$gpu_info" ]; then
+        # Get GPU memory in MB
+        local gpu_mem=$(ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits")
+        if [ ! -z "$gpu_mem" ]; then
+            # Use 95% of GPU memory
+            local cache_size=$((gpu_mem * 95 / 100))
+            gpu_config='"gpu_layers": 43, "num_gpu": 1, "gpu_memory_utilization": 0.95, "cache_capacity_mb": '$cache_size','
+            
+            # Set GPU to exclusive process mode
+            ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "sudo nvidia-smi -c EXCLUSIVE_PROCESS" >/dev/null 2>&1
+        fi
+    fi
+    
+    # Create optimized configuration
+    local config='{
+        '$gpu_config'
+        "num_thread": '$num_threads',
+        "num_batch": 512,
+        "num_ctx": '$ctx_size',
+        "num_keep": '$((num_threads * 2))',
+        "num_gqa": 8,
+        "f16": true,
+        "mmap": true,
+        "rope_frequency_base": 10000,
+        "rope_frequency_scale": 1.0
+    }'
+    
+    # Apply configuration
+    echo "Applying optimized configuration..."
+    ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "sudo mkdir -p /etc/ollama && echo '$config' | sudo tee /etc/ollama/config.json >/dev/null"
+    
+    # Restart Ollama service
+    echo "Restarting Ollama service..."
+    ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "sudo systemctl restart ollama"
+    
+    # Set process priority
+    echo "Setting process priority..."
+    ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "sudo renice -n -19 \$(pgrep ollama) && sudo chrt -f -p 99 \$(pgrep ollama)" >/dev/null 2>&1
+    
+    echo "Optimization completed successfully!"
+    return 0
+}
+
 # Ensure Ollama is running with required model
 ensure_ollama() {
     local base_url="$OLLAMA_BASE_URL"
     
     if check_remote_config; then
         echo "Checking connection to remote Ollama server..."
+        
+        # Optimize Ollama configuration
+        optimize_ollama
         
         # Test connection
         if ! curl -s "$base_url/version" >/dev/null; then
@@ -458,6 +530,8 @@ case "$1" in
     "setup")
         setup_env
         ensure_ollama
+        echo "Optimizing Ollama for maximum performance..."
+        optimize_ollama
         echo "DevTeam environment is ready!"
         ;;
     "remote")
