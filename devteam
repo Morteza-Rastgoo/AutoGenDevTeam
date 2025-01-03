@@ -18,8 +18,6 @@ load_env() {
     OLLAMA_MODEL=${OLLAMA_MODEL:-"llama2"}
     OLLAMA_LOCAL_PORT=${OLLAMA_LOCAL_PORT:-"11434"}
     
-    # Disable Docker for AutoGen
-    export AUTOGEN_USE_DOCKER="False"
     export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 }
 
@@ -27,38 +25,88 @@ load_env() {
 setup_env() {
     mkdir -p "$CONFIG_DIR" "$WORKSPACE_DIR"
     
+    # Remove existing venv if installation failed previously
+    if [ -f "$SCRIPT_DIR/venv/setup_failed" ]; then
+        echo "Previous setup failed. Removing old virtual environment..."
+        rm -rf "$SCRIPT_DIR/venv"
+    fi
+    
     if [ ! -d "$SCRIPT_DIR/venv" ]; then
         echo "Setting up Python environment..."
         python3 -m venv "$SCRIPT_DIR/venv"
-        source "$SCRIPT_DIR/venv/bin/activate"
-        
-        # Create requirements file if it doesn't exist
-        if [ ! -f "$CONFIG_DIR/requirements.txt" ]; then
-            cat > "$CONFIG_DIR/requirements.txt" << EOL
-pyautogen>=0.2.8
-requests>=2.31.0
-termcolor>=2.3.0
-python-dotenv>=1.0.0
-fix-busted-json>=0.1.0
-ollama>=0.1.0
-EOL
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to create virtual environment"
+            exit 1
         fi
         
+        # Create marker file
+        touch "$SCRIPT_DIR/venv/setup_failed"
+        
+        source "$SCRIPT_DIR/venv/bin/activate"
+        
         echo "Upgrading pip..."
-        python3 -m pip install --upgrade pip >/dev/null 2>&1
+        python3 -m pip install --upgrade pip wheel setuptools >/dev/null 2>&1
         
         echo "Installing Python packages..."
-        python3 -m pip install -r "$CONFIG_DIR/requirements.txt"
+        if python3 -m pip install -r "$CONFIG_DIR/requirements.txt"; then
+            rm -f "$SCRIPT_DIR/venv/setup_failed"
+            echo "Package installation successful!"
+        else
+            echo "Error: Package installation failed"
+            exit 1
+        fi
     else
         source "$SCRIPT_DIR/venv/bin/activate"
+        
+        # Check if packages need to be updated
+        if ! python3 - <<'END'
+import pkg_resources
+import sys
+required = {}
+with open("config/requirements.txt") as f:
+    for line in f:
+        line = line.strip()
+        if line and not line.startswith("#"):
+            if ">=" in line:
+                pkg, ver = line.split(">=")
+                required[pkg.strip()] = ver.strip()
+            elif "==" in line:
+                pkg, ver = line.split("==")
+                required[pkg.strip()] = ver.strip()
+
+needs_update = False
+for pkg, ver in required.items():
+    try:
+        installed = pkg_resources.get_distribution(pkg)
+        if ver and installed.version != ver and ">=" not in line:
+            print(f"Package {pkg} version mismatch: installed={installed.version}, required={ver}")
+            needs_update = True
+            break
+    except pkg_resources.DistributionNotFound:
+        print(f"Package {pkg} not found")
+        needs_update = True
+        break
+
+sys.exit(1 if needs_update else 0)
+END
+        then
+            echo "Updating Python packages..."
+            if ! python3 -m pip install -r "$CONFIG_DIR/requirements.txt"; then
+                echo "Error: Package update failed"
+                exit 1
+            fi
+        fi
     fi
     
     # Verify installation
-    if ! python3 -c "import autogen" 2>/dev/null; then
-        echo "Error: Failed to install required Python packages."
-        echo "Try removing the venv directory and running setup again."
+    if ! python3 -c "import crewai" 2>/dev/null; then
+        echo "Error: Failed to import crewai. Removing virtual environment..."
+        rm -rf "$SCRIPT_DIR/venv"
+        echo "Please run setup again"
         exit 1
     fi
+    
+    echo "Environment setup completed successfully!"
 }
 
 # Check if remote configuration is available in environment
@@ -87,29 +135,49 @@ check_remote_config() {
 # Setup SSH tunnel to remote Ollama server
 setup_tunnel() {
     if ! check_remote_config; then
-        echo "Remote configuration not found. Running local Ollama."
+        echo "Remote configuration not found. Please set up remote configuration."
         return 1
     fi
     
+    # Kill any existing tunnels
     if [ -f "$TUNNEL_PID_FILE" ]; then
         OLD_PID=$(cat "$TUNNEL_PID_FILE")
         if kill -0 "$OLD_PID" 2>/dev/null; then
-            echo "Tunnel already running"
-            return 0
+            echo "Stopping existing tunnel..."
+            kill "$OLD_PID"
+            rm "$TUNNEL_PID_FILE"
+            sleep 2
         fi
-        rm "$TUNNEL_PID_FILE"
+    fi
+
+    # Kill any process using our local port
+    local pid=$(lsof -ti:${OLLAMA_LOCAL_PORT})
+    if [ ! -z "$pid" ]; then
+        echo "Port ${OLLAMA_LOCAL_PORT} is in use. Freeing it..."
+        kill -9 "$pid"
+        sleep 2
     fi
 
     echo "Setting up tunnel to remote Ollama server..."
     ssh -f -N -L "${OLLAMA_LOCAL_PORT}:localhost:${OLLAMA_REMOTE_PORT}" \
         "${OLLAMA_REMOTE_USER}@${OLLAMA_REMOTE_HOST}" \
         -i "${OLLAMA_SSH_KEY}" \
-        -o StrictHostKeyChecking=accept-new
+        -o StrictHostKeyChecking=accept-new \
+        -o ExitOnForwardFailure=yes
     
     if [ $? -eq 0 ]; then
         echo $! > "$TUNNEL_PID_FILE"
-        sleep 2
-        echo "Tunnel established successfully"
+        
+        # Wait for tunnel to be ready
+        echo "Waiting for tunnel to be ready..."
+        for i in {1..10}; do
+            if nc -z localhost "${OLLAMA_LOCAL_PORT}" 2>/dev/null; then
+                echo "Tunnel established successfully"
+                return 0
+            fi
+            sleep 1
+        done
+        echo "Warning: Tunnel established but connection not verified"
         return 0
     else
         echo "Failed to establish tunnel"
@@ -147,23 +215,40 @@ test_ollama_connection() {
 
 # Ensure Ollama is running with required model
 ensure_ollama() {
-    local base_url="http://localhost:${OLLAMA_LOCAL_PORT}"
+    local base_url="$OLLAMA_BASE_URL"
     
     if check_remote_config; then
-        if ! setup_tunnel; then
-            echo "Failed to set up remote connection. Falling back to local Ollama."
-            setup_local_ollama
+        echo "Checking connection to remote Ollama server..."
+        
+        # Test connection
+        if ! curl -s "$base_url/version" >/dev/null; then
+            echo "Error: Could not connect to Ollama server"
+            echo "Checking if Ollama is running on remote host..."
+            
+            # Try to start Ollama on remote host
+            ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama serve >/dev/null 2>&1 &"
+            sleep 5
+            
+            # Test connection again
+            if ! curl -s "$base_url/version" >/dev/null; then
+                echo "Error: Failed to connect to Ollama server"
+                exit 1
+            fi
         fi
+        
+        # Check if model exists on remote
+        echo "Checking if model $OLLAMA_MODEL exists on remote..."
+        if ! ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama list" | grep -q "$OLLAMA_MODEL"; then
+            echo "Pulling $OLLAMA_MODEL on remote host..."
+            ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama pull $OLLAMA_MODEL"
+        fi
+        
+        export OLLAMA_BASE_URL="$base_url"
     else
-        setup_local_ollama
-    fi
-    
-    if ! test_ollama_connection "$base_url"; then
-        echo "Error: Could not connect to Ollama server at $base_url"
+        echo "Error: Remote configuration not found"
+        echo "Please set up remote configuration in .env file"
         exit 1
     fi
-    
-    export OLLAMA_BASE_URL="$base_url"
 }
 
 # Setup local Ollama instance
@@ -194,119 +279,157 @@ setup_local_ollama() {
 # Main team interaction script
 run_team() {
     local task_msg="$1"
-    python3 - << EOF
-import autogen
-from typing import Dict, List
+    python3 - "$task_msg" << 'EOF' | tee -a "$SCRIPT_DIR/devteam.log"
+from crewai import Agent, Task, Crew, Process
+from langchain_community.llms import Ollama
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 import os
 from termcolor import colored
+import sys
+import time
+import requests
 
-# Load configuration
-config_list = [{
-    "model": os.getenv("OLLAMA_MODEL", "llama2"),
-    "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/api"),
-    "api_type": "ollama",
-    "timeout": 60,
-    "seed": 42,
-    "context_length": 4096
-}]
+def wait_for_ollama(base_url, timeout=30, interval=2):
+    """Wait for Ollama server to be ready"""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(f"{base_url}/api/version")
+            if response.status_code == 200:
+                return True
+        except requests.exceptions.RequestException:
+            pass
+        time.sleep(interval)
+    return False
 
-TEAM_ROLES = {
-    "architect": """You are a software architect. ONLY:
-    1. Create directory structure
-    2. List files to create
-    3. Define interfaces
-    NO explanations. NO discussion. Just code structure.""",
+# Get task message from command line argument
+task_description = sys.argv[1]
+
+# Setup Ollama configuration
+base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+model = os.getenv("OLLAMA_MODEL", "llama2")
+
+# Wait for Ollama to be ready
+print(colored("\nChecking Ollama connection...", "yellow"))
+if not wait_for_ollama(base_url):
+    print(colored("Error: Could not connect to Ollama server", "red"))
+    sys.exit(1)
+
+# Initialize Ollama LLM with streaming
+llm = Ollama(
+    base_url=base_url,
+    model=model,
+    callbacks=[StreamingStdOutCallbackHandler()],
+    temperature=0.5,
+    timeout=120
+)
+
+# Create agents with specific roles
+architect = Agent(
+    role='Software Architect',
+    goal='Design and plan software architecture',
+    backstory="""Expert software architect with extensive experience in system design.
+    Focuses on creating clean, maintainable, and well-structured applications.
+    Proficient in various design patterns and best practices.""",
+    llm=llm,
+    verbose=True,
+    allow_delegation=False
+)
+
+developer = Agent(
+    role='Software Developer',
+    goal='Implement high-quality code',
+    backstory="""Senior developer with strong coding skills and attention to detail.
+    Writes clean, efficient, and well-documented code.
+    Expert in implementing robust error handling and testing.""",
+    llm=llm,
+    verbose=True,
+    allow_delegation=False
+)
+
+reviewer = Agent(
+    role='Code Reviewer',
+    goal='Ensure code quality and best practices',
+    backstory="""Experienced code reviewer with a keen eye for detail.
+    Ensures code meets quality standards, follows best practices, and is well-tested.
+    Expert in identifying potential issues and suggesting improvements.""",
+    llm=llm,
+    verbose=True,
+    allow_delegation=False
+)
+
+# Create tasks with clear instructions
+design_task = Task(
+    description=f"""Design the architecture for: {task_description}
     
-    "developer": """You are a Python developer. ONLY:
-    1. Write code in specified files
-    2. Implement error handling
-    3. Add unit tests
-    NO explanations. NO discussion. Just write code.""",
+    Requirements:
+    1. Create a clear and organized project structure
+    2. Define all necessary components and their interactions
+    3. Specify required dependencies and their versions
+    4. Consider scalability and maintainability
+    5. Document design decisions and rationale
     
-    "reviewer": """You are a code reviewer. ONLY:
-    1. List specific issues
-    2. Provide fix in code
-    Stay silent if no issues found."""
-}
+    Output should include:
+    - Project structure
+    - Component diagram or description
+    - List of dependencies
+    - Implementation guidelines""",
+    agent=architect
+)
 
-# Configure code execution settings
-code_execution_config = {
-    "use_docker": False,
-    "work_dir": "samples/calculator",
-    "last_n_messages": 3,
-    "timeout": 60
-}
+implement_task = Task(
+    description=f"""Implement the solution based on the architect's design: {task_description}
+    
+    Requirements:
+    1. Follow the provided design architecture
+    2. Write clean, well-documented code
+    3. Implement proper error handling
+    4. Add necessary comments and docstrings
+    5. Create required project files
+    
+    Output should include:
+    - Complete implementation
+    - Documentation
+    - Setup instructions""",
+    agent=developer
+)
+
+review_task = Task(
+    description=f"""Review the implementation of: {task_description}
+    
+    Review criteria:
+    1. Code quality and best practices
+    2. Error handling completeness
+    3. Documentation quality
+    4. Test coverage
+    5. Project structure
+    
+    Output should include:
+    - Review findings
+    - Suggested improvements
+    - Final approval or change requests""",
+    agent=reviewer
+)
+
+# Create crew with sequential process
+crew = Crew(
+    agents=[architect, developer, reviewer],
+    tasks=[design_task, implement_task, review_task],
+    verbose=True,
+    process=Process.sequential
+)
+
+print(colored("\nStarting task execution...", "green"))
+print(colored("Task: " + task_description + "\n", "yellow"))
 
 try:
-    task = """${task_msg}"""
-    
-    # Create the samples/calculator directory if it doesn't exist
-    os.makedirs("samples/calculator", exist_ok=True)
-    
-    # Create user proxy with specific configuration
-    user_proxy = autogen.UserProxyAgent(
-        name="user",
-        human_input_mode="NEVER",
-        max_consecutive_auto_reply=10,
-        code_execution_config=code_execution_config,
-        system_message="Execute code. Report only errors."
-    )
-
-    # Create team members with configuration
-    config = {
-        "config_list": config_list,
-        "timeout": 60,
-        "temperature": 0,
-        "max_tokens": 2000
-    }
-    
-    architect = autogen.AssistantAgent(
-        name="architect",
-        llm_config=config,
-        system_message=TEAM_ROLES["architect"]
-    )
-    
-    developer = autogen.AssistantAgent(
-        name="developer",
-        llm_config=config,
-        system_message=TEAM_ROLES["developer"]
-    )
-    
-    reviewer = autogen.AssistantAgent(
-        name="reviewer",
-        llm_config=config,
-        system_message=TEAM_ROLES["reviewer"]
-    )
-
-    # Set up group chat with specific order
-    groupchat = autogen.GroupChat(
-        agents=[user_proxy, architect, developer, reviewer],
-        messages=[],
-        max_round=8,
-        speaker_selection_method="round_robin"
-    )
-    manager = autogen.GroupChatManager(groupchat=groupchat)
-
-    print(colored("\nStarting task execution...", "green"))
-    print(colored("Task: " + task + "\n", "yellow"))
-
-    # Start the task with clear instructions
-    user_proxy.initiate_chat(
-        manager,
-        message=f"""Task: {task}
-        
-        Rules:
-        1. Write code only
-        2. No discussions
-        3. No explanations
-        4. Move to next if no issues
-        """
-    )
-
+    # Execute the crew's tasks
+    result = crew.kickoff()
+    print("\nTask Result:")
+    print(colored(result, "cyan"))
 except Exception as e:
-    print(colored(f"\nError: {str(e)}", "red"))
-    print(colored("Please check your configuration and try again.", "yellow"))
-    exit(1)
+    print(colored(f"\nError during task execution: {str(e)}", "red"))
+    sys.exit(1)
 EOF
 }
 
