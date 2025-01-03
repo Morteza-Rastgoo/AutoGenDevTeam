@@ -1,7 +1,16 @@
-.env
+# Python virtual environment
+venv/
 __pycache__/
 *.pyc
-.DS_Store
-workspace/
+
+# IDE files
+.vscode/
 .idea/
-.vscode/ 
+*.iml
+
+# Cache files
+.cache/
+*.cache
+
+# Environment files
+.env 
