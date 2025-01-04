@@ -5,6 +5,7 @@ CONFIG_DIR="$SCRIPT_DIR/config"
 WORKSPACE_DIR="$SCRIPT_DIR/workspace"
 TUNNEL_PID_FILE="$CONFIG_DIR/.tunnel.pid"
 OLLAMA_PID_FILE="$CONFIG_DIR/.ollama.pid"
+OLLAMA_MODE_FILE="$CONFIG_DIR/.ollama_mode"
 
 # Load environment variables
 load_env() {
@@ -19,6 +20,75 @@ load_env() {
     OLLAMA_LOCAL_PORT=${OLLAMA_LOCAL_PORT:-"11434"}
     
     export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+}
+
+# Get current Ollama mode
+get_ollama_mode() {
+    if [ -f "$OLLAMA_MODE_FILE" ]; then
+        cat "$OLLAMA_MODE_FILE"
+    else
+        echo ""
+    fi
+}
+
+# Set Ollama mode
+set_ollama_mode() {
+    local mode="$1"
+    echo "$mode" > "$OLLAMA_MODE_FILE"
+}
+
+# Select Ollama mode
+select_ollama_mode() {
+    local current_mode=$(get_ollama_mode)
+    
+    if [ -z "$1" ] && [ ! -z "$current_mode" ]; then
+        echo "Current Ollama mode: $current_mode"
+        return 0
+    fi
+    
+    if [ ! -z "$1" ]; then
+        case "$1" in
+            "local"|"remote")
+                set_ollama_mode "$1"
+                echo "Ollama mode set to: $1"
+                return 0
+                ;;
+            *)
+                echo "Invalid mode. Please choose 'local' or 'remote'"
+                return 1
+                ;;
+        esac
+    fi
+    
+    echo "Please select Ollama mode:"
+    echo "1) Local installation"
+    echo "2) Remote server"
+    read -p "Enter choice [1-2]: " choice
+    
+    case "$choice" in
+        1)
+            if ! command -v ollama >/dev/null 2>&1; then
+                echo "Error: Local Ollama is not installed. Please install it first."
+                echo "Visit: https://ollama.com/download"
+                return 1
+            fi
+            set_ollama_mode "local"
+            echo "Using local Ollama installation"
+            ;;
+        2)
+            if ! check_remote_config; then
+                check_remote_config "show"
+                return 1
+            fi
+            set_ollama_mode "remote"
+            echo "Using remote Ollama server"
+            ;;
+        *)
+            echo "Invalid choice"
+            return 1
+            ;;
+    esac
+    return 0
 }
 
 # Ensure virtual environment exists and is activated
@@ -284,43 +354,56 @@ optimize_ollama() {
 
 # Ensure Ollama is running with required model
 ensure_ollama() {
-    local base_url="$OLLAMA_BASE_URL"
+    local mode=$(get_ollama_mode)
     
-    if check_remote_config; then
-        echo "Checking connection to remote Ollama server..."
-        
-        # Optimize Ollama configuration
-        optimize_ollama
-        
-        # Test connection
-        if ! curl -s "$base_url/version" >/dev/null; then
-            echo "Error: Could not connect to Ollama server"
-            echo "Checking if Ollama is running on remote host..."
-            
-            # Try to start Ollama on remote host
-            ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama serve >/dev/null 2>&1 &"
-            sleep 5
-            
-            # Test connection again
-            if ! curl -s "$base_url/version" >/dev/null; then
-                echo "Error: Failed to connect to Ollama server"
-                exit 1
-            fi
+    if [ -z "$mode" ]; then
+        echo "Ollama mode not selected."
+        if ! select_ollama_mode; then
+            echo "Failed to select Ollama mode"
+            exit 1
         fi
-        
-        # Check if model exists on remote
-        echo "Checking if model $OLLAMA_MODEL exists on remote..."
-        if ! ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama list" | grep -q "$OLLAMA_MODEL"; then
-            echo "Pulling $OLLAMA_MODEL on remote host..."
-            ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama pull $OLLAMA_MODEL"
-        fi
-        
-        export OLLAMA_BASE_URL="$base_url"
-    else
-        echo "Error: Remote configuration not found"
-        echo "Please set up remote configuration in .env file"
-        exit 1
+        mode=$(get_ollama_mode)
     fi
+    
+    case "$mode" in
+        "local")
+            setup_local_ollama
+            export OLLAMA_BASE_URL="http://localhost:11434"
+            ;;
+        "remote")
+            local base_url="$OLLAMA_BASE_URL"
+            echo "Checking connection to remote Ollama server..."
+            
+            # Test connection
+            if ! curl -s "$base_url/version" >/dev/null; then
+                echo "Error: Could not connect to Ollama server"
+                echo "Checking if Ollama is running on remote host..."
+                
+                # Try to start Ollama on remote host
+                ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama serve >/dev/null 2>&1 &"
+                sleep 5
+                
+                # Test connection again
+                if ! curl -s "$base_url/version" >/dev/null; then
+                    echo "Error: Failed to connect to Ollama server"
+                    exit 1
+                fi
+            fi
+            
+            # Check if model exists on remote
+            echo "Checking if model $OLLAMA_MODEL exists on remote..."
+            if ! ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama list" | grep -q "$OLLAMA_MODEL"; then
+                echo "Pulling $OLLAMA_MODEL on remote host..."
+                ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama pull $OLLAMA_MODEL"
+            fi
+            
+            export OLLAMA_BASE_URL="$base_url"
+            ;;
+        *)
+            echo "Invalid Ollama mode: $mode"
+            exit 1
+            ;;
+    esac
 }
 
 # Setup local Ollama instance
@@ -352,16 +435,111 @@ setup_local_ollama() {
 run_team() {
     local task_msg="$1"
     python3 - "$task_msg" << 'EOF' | tee -a "$SCRIPT_DIR/devteam.log"
-from crewai import Agent, Task, Crew, Process
-from langchain_community.llms import Ollama
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-import os
-from termcolor import colored
-import sys
-import time
-import requests
+#!/usr/bin/env python3
 
-def wait_for_ollama(base_url, timeout=30, interval=2):
+import os
+import sys
+import json
+import time
+import signal
+import requests
+import subprocess
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from langchain.tools import BaseTool
+from crewai import Agent, Task, Crew, Process
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain_community.llms import Ollama
+from termcolor import colored
+
+# Constants
+WORKSPACE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
+
+# Define tool schemas
+class WriteFileInput(BaseModel):
+    filename: str = Field(description="Name of the file to write")
+    content: str = Field(description="Content to write to the file")
+    
+    model_config = {"extra": "forbid"}
+
+class ReadFileInput(BaseModel):
+    filename: str = Field(description="Name of the file to read")
+    
+    model_config = {"extra": "forbid"}
+
+# Define file tools
+class WriteFileTool(BaseTool):
+    name = "write_file"
+    description = "Write content to a file in the workspace directory"
+    args_schema = WriteFileInput
+    
+    def _run(self, filename: str, content: str) -> str:
+        """Write content to a file in the workspace directory."""
+        try:
+            file_path = os.path.join(WORKSPACE_DIR, filename)
+            with open(file_path, 'w') as f:
+                f.write(content)
+            return f"Successfully wrote to {filename}"
+        except Exception as e:
+            return f"Error writing to file: {str(e)}"
+            
+    def _arun(self, filename: str, content: str) -> str:
+        raise NotImplementedError("Async not implemented")
+
+class ReadFileTool(BaseTool):
+    name = "read_file"
+    description = "Read content from a file in the workspace directory"
+    args_schema = ReadFileInput
+    
+    def _run(self, filename: str) -> str:
+        """Read content from a file in the workspace directory."""
+        try:
+            file_path = os.path.join(WORKSPACE_DIR, filename)
+            with open(file_path, 'r') as f:
+                return f.read()
+        except Exception as e:
+            return f"Error reading file: {str(e)}"
+            
+    def _arun(self, filename: str) -> str:
+        raise NotImplementedError("Async not implemented")
+
+class ListFilesTool(BaseTool):
+    name = "list_files"
+    description = "List all files in the workspace directory"
+    
+    def _run(self, tool_input: str = "") -> str:
+        """List all files in the workspace directory."""
+        try:
+            files = os.listdir(WORKSPACE_DIR)
+            return "\n".join(files) if files else "No files found in workspace"
+        except Exception as e:
+            return f"Error listing files: {str(e)}"
+            
+    def _arun(self, tool_input: str = "") -> str:
+        raise NotImplementedError("Async not implemented")
+
+# Create tools list
+tools = [WriteFileTool(), ReadFileTool(), ListFilesTool()]
+
+# Define agent and task models
+class AgentConfig(BaseModel):
+    role: str = Field(description="The role of the agent")
+    goal: str = Field(description="The goal or objective of the agent")
+    backstory: str = Field(description="The background story and expertise of the agent")
+    verbose: bool = Field(default=True, description="Whether to enable verbose output")
+    allow_delegation: bool = Field(default=False, description="Whether to allow task delegation")
+    
+    model_config = {"extra": "forbid"}
+
+class TaskConfig(BaseModel):
+    description: str = Field(description="The task description")
+    agent_role: str = Field(description="The role of the agent assigned to this task")
+    context: Optional[Dict[str, Any]] = Field(default=None, description="Additional context for the task")
+    
+    model_config = {"extra": "forbid"}
+
+def wait_for_ollama(base_url: str, timeout: int = 30, interval: int = 2) -> bool:
     """Wait for Ollama server to be ready"""
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -396,112 +574,115 @@ llm = Ollama(
     timeout=120
 )
 
-# Create agents with specific roles
-architect = Agent(
-    role='Software Architect',
-    goal='Design and plan software architecture',
-    backstory="""Expert software architect with extensive experience in system design.
-    Focuses on creating clean, maintainable, and well-structured applications.
-    Proficient in various design patterns and best practices.""",
-    llm=llm,
-    verbose=True,
-    allow_delegation=False
-)
+# Define agent configurations
+agent_configs = [
+    AgentConfig(
+        role='Software Architect',
+        goal='Design and plan software architecture',
+        backstory="""Expert software architect with extensive experience in system design.
+        Focuses on creating clean, maintainable, and well-structured applications.
+        Proficient in various design patterns and best practices."""
+    ),
+    AgentConfig(
+        role='Software Developer',
+        goal='Implement high-quality code',
+        backstory="""Senior developer with strong coding skills and attention to detail.
+        Writes clean, efficient, and well-documented code.
+        Expert in implementing robust error handling and testing."""
+    ),
+    AgentConfig(
+        role='Code Reviewer',
+        goal='Ensure code quality and best practices',
+        backstory="""Experienced code reviewer with a keen eye for detail.
+        Ensures code meets quality standards, follows best practices, and is well-tested.
+        Expert in identifying potential issues and suggesting improvements."""
+    )
+]
 
-developer = Agent(
-    role='Software Developer',
-    goal='Implement high-quality code',
-    backstory="""Senior developer with strong coding skills and attention to detail.
-    Writes clean, efficient, and well-documented code.
-    Expert in implementing robust error handling and testing.""",
-    llm=llm,
-    verbose=True,
-    allow_delegation=False
-)
+# Define task configurations
+task_configs = [
+    TaskConfig(
+        description=f"""Design and create a hello.py file that prints 'Hello, World!'.
 
-reviewer = Agent(
-    role='Code Reviewer',
-    goal='Ensure code quality and best practices',
-    backstory="""Experienced code reviewer with a keen eye for detail.
-    Ensures code meets quality standards, follows best practices, and is well-tested.
-    Expert in identifying potential issues and suggesting improvements.""",
-    llm=llm,
-    verbose=True,
-    allow_delegation=False
-)
+        Requirements:
+        1. Create a file named 'hello.py' in the workspace directory
+        2. The file should print 'Hello, World!' when executed
+        3. Follow PEP 8 style guidelines
+        
+        Available tools:
+        - write_file: Use this to write the file (parameters: filename, content)
+        - read_file: Use this to read files (parameters: filename)
+        - list_files: Use this to list workspace files (no parameters)
+        
+        The workspace directory is: {WORKSPACE_DIR}
+        
+        Steps:
+        1. Use write_file tool to create hello.py with the following content:
+           ```python
+           print('Hello, World!')
+           ```
+        2. Use read_file tool to verify the file was created correctly""",
+        agent_role='Software Architect'
+    ),
+    TaskConfig(
+        description=f"""Review and verify the hello.py implementation.
+        
+        Requirements:
+        1. Read the hello.py file
+        2. Verify it follows PEP 8 guidelines
+        3. Confirm it prints 'Hello, World!'
+        4. Write a review summary
+        
+        Available tools:
+        - read_file: Use this to read the file (parameters: filename)
+        - write_file: Use this to write review (parameters: filename, content)
+        
+        Steps:
+        1. Use read_file tool to read hello.py
+        2. Review the implementation
+        3. Use write_file tool to write review.txt with your findings""",
+        agent_role='Code Reviewer'
+    )
+]
 
-# Create tasks with clear instructions
-design_task = Task(
-    description=f"""Design the architecture for: {task_description}
-    
-    Requirements:
-    1. Create a clear and organized project structure
-    2. Define all necessary components and their interactions
-    3. Specify required dependencies and their versions
-    4. Consider scalability and maintainability
-    5. Document design decisions and rationale
-    
-    Output should include:
-    - Project structure
-    - Component diagram or description
-    - List of dependencies
-    - Implementation guidelines""",
-    agent=architect
-)
+# Create agents
+agents = []
+for config in agent_configs:
+    agent = Agent(
+        role=config.role,
+        goal=config.goal,
+        backstory=config.backstory,
+        verbose=config.verbose,
+        allow_delegation=config.allow_delegation,
+        llm=llm,
+        tools=tools
+    )
+    agents.append(agent)
 
-implement_task = Task(
-    description=f"""Implement the solution based on the architect's design: {task_description}
-    
-    Requirements:
-    1. Follow the provided design architecture
-    2. Write clean, well-documented code
-    3. Implement proper error handling
-    4. Add necessary comments and docstrings
-    5. Create required project files
-    
-    Output should include:
-    - Complete implementation
-    - Documentation
-    - Setup instructions""",
-    agent=developer
-)
+# Create tasks
+tasks = []
+for config in task_configs:
+    agent = next((a for a in agents if a.role == config.agent_role), None)
+    if agent:
+        task = Task(
+            description=config.description,
+            agent=agent
+        )
+        tasks.append(task)
 
-review_task = Task(
-    description=f"""Review the implementation of: {task_description}
-    
-    Review criteria:
-    1. Code quality and best practices
-    2. Error handling completeness
-    3. Documentation quality
-    4. Test coverage
-    5. Project structure
-    
-    Output should include:
-    - Review findings
-    - Suggested improvements
-    - Final approval or change requests""",
-    agent=reviewer
-)
-
-# Create crew with sequential process
+# Create and run crew
 crew = Crew(
-    agents=[architect, developer, reviewer],
-    tasks=[design_task, implement_task, review_task],
-    verbose=True,
+    agents=agents,
+    tasks=tasks,
+    verbose=2,
     process=Process.sequential
 )
 
-print(colored("\nStarting task execution...", "green"))
-print(colored("Task: " + task_description + "\n", "yellow"))
+# Execute the task
+result = crew.kickoff()
+print("\nTask execution completed!")
+print("Result:", result)
 
-try:
-    # Execute the crew's tasks
-    result = crew.kickoff()
-    print("\nTask Result:")
-    print(colored(result, "cyan"))
-except Exception as e:
-    print(colored(f"\nError during task execution: {str(e)}", "red"))
-    sys.exit(1)
 EOF
 }
 
@@ -529,33 +710,30 @@ load_env
 case "$1" in
     "setup")
         setup_env
+        if ! select_ollama_mode; then
+            echo "Failed to select Ollama mode"
+            exit 1
+        fi
         ensure_ollama
         echo "Optimizing Ollama for maximum performance..."
-        optimize_ollama
+        if [ "$(get_ollama_mode)" = "remote" ] && optimize_ollama; then
+            echo "Ollama optimization completed."
+            touch "$CONFIG_DIR/.ollama_optimized"
+        else
+            echo "Warning: Ollama optimization skipped or failed, continuing with default settings."
+        fi
         echo "DevTeam environment is ready!"
         ;;
-    "remote")
+    "mode")
         case "$2" in
-            "status")
-                if check_remote_config; then
-                    echo "Remote configuration is set:"
-                    echo "Host: $OLLAMA_REMOTE_HOST"
-                    echo "User: $OLLAMA_REMOTE_USER"
-                    echo "Port: $OLLAMA_REMOTE_PORT"
-                    echo "SSH Key: $OLLAMA_SSH_KEY"
-                    echo "Model: $OLLAMA_MODEL"
-                    echo "Local Port: $OLLAMA_LOCAL_PORT"
-                else
-                    check_remote_config "show"
-                fi
+            "")
+                select_ollama_mode
                 ;;
-            "stop")
-                stop_tunnel
+            "local"|"remote")
+                select_ollama_mode "$2"
                 ;;
             *)
-                echo "Usage:"
-                echo "  ./devteam remote status  - Check remote configuration status"
-                echo "  ./devteam remote stop    - Stop remote tunnel"
+                echo "Usage: ./devteam mode [local|remote]"
                 exit 1
                 ;;
         esac
@@ -572,8 +750,7 @@ case "$1" in
     *)
         echo "Usage:"
         echo "  ./devteam setup              - Set up the development environment"
-        echo "  ./devteam remote status      - Check remote configuration"
-        echo "  ./devteam remote stop        - Stop remote tunnel"
+        echo "  ./devteam mode [local|remote] - Select Ollama mode (local/remote)"
         echo "  ./devteam task 'description' - Assign a task to the team"
         exit 1
         ;;
