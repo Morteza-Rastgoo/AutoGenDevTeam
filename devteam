@@ -552,136 +552,130 @@ def wait_for_ollama(base_url: str, timeout: int = 30, interval: int = 2) -> bool
         time.sleep(interval)
     return False
 
-# Get task message from command line argument
-task_description = sys.argv[1]
+def handle_exit(signum, frame):
+    print(colored("\nGracefully shutting down...", "yellow"))
+    sys.exit(0)
 
-# Setup Ollama configuration
-base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-model = os.getenv("OLLAMA_MODEL", "llama2")
+signal.signal(signal.SIGINT, handle_exit)
+signal.signal(signal.SIGTERM, handle_exit)
 
-# Wait for Ollama to be ready
-print(colored("\nChecking Ollama connection...", "yellow"))
-if not wait_for_ollama(base_url):
-    print(colored("Error: Could not connect to Ollama server", "red"))
-    sys.exit(1)
-
-# Initialize Ollama LLM with streaming
-llm = Ollama(
-    base_url=base_url,
-    model=model,
-    callbacks=[StreamingStdOutCallbackHandler()],
-    temperature=0.5,
-    timeout=120
-)
-
-# Define agent configurations
-agent_configs = [
-    AgentConfig(
-        role='Software Architect',
-        goal='Design and plan software architecture',
-        backstory="""Expert software architect with extensive experience in system design.
-        Focuses on creating clean, maintainable, and well-structured applications.
-        Proficient in various design patterns and best practices."""
-    ),
-    AgentConfig(
-        role='Software Developer',
-        goal='Implement high-quality code',
-        backstory="""Senior developer with strong coding skills and attention to detail.
-        Writes clean, efficient, and well-documented code.
-        Expert in implementing robust error handling and testing."""
-    ),
-    AgentConfig(
-        role='Code Reviewer',
-        goal='Ensure code quality and best practices',
-        backstory="""Experienced code reviewer with a keen eye for detail.
-        Ensures code meets quality standards, follows best practices, and is well-tested.
-        Expert in identifying potential issues and suggesting improvements."""
-    )
-]
-
-# Define task configurations
-task_configs = [
-    TaskConfig(
-        description=f"""Design and create a hello.py file that prints 'Hello, World!'.
-
-        Requirements:
-        1. Create a file named 'hello.py' in the workspace directory
-        2. The file should print 'Hello, World!' when executed
-        3. Follow PEP 8 style guidelines
-        
-        Available tools:
-        - write_file: Use this to write the file (parameters: filename, content)
-        - read_file: Use this to read files (parameters: filename)
-        - list_files: Use this to list workspace files (no parameters)
-        
-        The workspace directory is: {WORKSPACE_DIR}
-        
-        Steps:
-        1. Use write_file tool to create hello.py with the following content:
-           ```python
-           print('Hello, World!')
-           ```
-        2. Use read_file tool to verify the file was created correctly""",
-        agent_role='Software Architect'
-    ),
-    TaskConfig(
-        description=f"""Review and verify the hello.py implementation.
-        
-        Requirements:
-        1. Read the hello.py file
-        2. Verify it follows PEP 8 guidelines
-        3. Confirm it prints 'Hello, World!'
-        4. Write a review summary
-        
-        Available tools:
-        - read_file: Use this to read the file (parameters: filename)
-        - write_file: Use this to write review (parameters: filename, content)
-        
-        Steps:
-        1. Use read_file tool to read hello.py
-        2. Review the implementation
-        3. Use write_file tool to write review.txt with your findings""",
-        agent_role='Code Reviewer'
-    )
-]
-
-# Create agents
-agents = []
-for config in agent_configs:
-    agent = Agent(
-        role=config.role,
-        goal=config.goal,
-        backstory=config.backstory,
-        verbose=config.verbose,
-        allow_delegation=config.allow_delegation,
-        llm=llm,
-        tools=tools
-    )
-    agents.append(agent)
-
-# Create tasks
-tasks = []
-for config in task_configs:
-    agent = next((a for a in agents if a.role == config.agent_role), None)
-    if agent:
-        task = Task(
-            description=config.description,
-            agent=agent
+def create_mvp_agents(llm):
+    """Create agents optimized for MVP development"""
+    return [
+        Agent(
+            role='Tech Lead',
+            goal='Design and oversee MVP development',
+            backstory="""Experienced tech lead focused on rapid MVP development.
+            Expert in breaking down complex requirements into minimal viable solutions.
+            Ensures the team delivers working code quickly while maintaining essential quality.""",
+            verbose=True,
+            allow_delegation=True,
+            llm=llm,
+            tools=tools
+        ),
+        Agent(
+            role='Full Stack Developer',
+            goal='Implement core MVP features',
+            backstory="""Efficient full-stack developer specialized in MVP development.
+            Expert in choosing the right tools and frameworks for rapid development.
+            Focuses on implementing core features that demonstrate product value.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=llm,
+            tools=tools
+        ),
+        Agent(
+            role='QA Engineer',
+            goal='Ensure MVP functionality',
+            backstory="""Pragmatic QA engineer focused on critical path testing.
+            Ensures core MVP features work as expected.
+            Balances speed with quality, focusing on must-have functionality.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=llm,
+            tools=tools
         )
-        tasks.append(task)
+    ]
 
-# Create and run crew
-crew = Crew(
-    agents=agents,
-    tasks=tasks,
-    verbose=2,
-    process=Process.sequential
-)
+def create_mvp_task(description: str, agent_role: str) -> Task:
+    """Create a task optimized for MVP development"""
+    return Task(
+        description=f"""Focus on MVP implementation for: {description}
 
-# Execute the task
-result = crew.kickoff()
-print("\nTask execution completed!")
-print("Result:", result)
+        Guidelines:
+        1. Start with the simplest working solution
+        2. Focus on core functionality first
+        3. Use established libraries and frameworks
+        4. Implement basic error handling
+        5. Write minimal but sufficient documentation
+        6. Create basic tests for critical paths
+        
+        Available tools:
+        - write_file: Create/update files
+        - read_file: Read file contents
+        - list_files: List workspace files
+        
+        Workspace directory: {WORKSPACE_DIR}""",
+        agent=next(a for a in agents if a.role == agent_role)
+    )
+
+# Main loop
+print(colored("\nStarting DevTeam in continuous mode...", "green"))
+print(colored("Press Ctrl+C to exit\n", "yellow"))
+
+while True:
+    try:
+        # Setup Ollama
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        model = os.getenv("OLLAMA_MODEL", "llama2")
+        
+        if not wait_for_ollama(base_url):
+            print(colored("Error: Could not connect to Ollama server", "red"))
+            time.sleep(5)
+            continue
+            
+        llm = Ollama(
+            base_url=base_url,
+            model=model,
+            callbacks=[StreamingStdOutCallbackHandler()],
+            temperature=0.5,
+            timeout=120
+        )
+        
+        # Create MVP-focused agents
+        agents = create_mvp_agents(llm)
+        
+        # Get task from command line
+        task_msg = sys.argv[1] if len(sys.argv) > 1 else input(colored("Enter task description: ", "cyan"))
+        
+        # Create MVP-focused task for tech lead
+        task = create_mvp_task(task_msg, 'Tech Lead')
+        
+        # Create and run crew
+        crew = Crew(
+            agents=agents,
+            tasks=[task],
+            verbose=2,
+            process=Process.sequential
+        )
+        
+        # Execute task
+        print(colored(f"\nWorking on task: {task_msg}\n", "green"))
+        result = crew.kickoff()
+        print(colored("\nTask completed!", "green"))
+        print("Result:", result)
+        
+        # Wait for next task
+        time.sleep(1)
+        print(colored("\nReady for next task...", "cyan"))
+        
+    except KeyboardInterrupt:
+        print(colored("\nGracefully shutting down...", "yellow"))
+        sys.exit(0)
+    except Exception as e:
+        print(colored(f"\nError: {str(e)}", "red"))
+        print(colored("Retrying in 5 seconds...", "yellow"))
+        time.sleep(5)
 
 EOF
 }
