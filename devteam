@@ -472,7 +472,7 @@ class ReadFileInput(BaseModel):
 class WriteFileTool(BaseTool):
     name: str = "write_file"
     description: str = "Write content to a file in the workspace directory"
-    args_schema = WriteFileInput
+    args_schema: type[WriteFileInput] = WriteFileInput
     
     def _run(self, filename: str, content: str) -> str:
         """Write content to a file in the workspace directory."""
@@ -490,7 +490,7 @@ class WriteFileTool(BaseTool):
 class ReadFileTool(BaseTool):
     name: str = "read_file"
     description: str = "Read content from a file in the workspace directory"
-    args_schema = ReadFileInput
+    args_schema: type[ReadFileInput] = ReadFileInput
     
     def _run(self, filename: str) -> str:
         """Read content from a file in the workspace directory."""
@@ -507,6 +507,7 @@ class ReadFileTool(BaseTool):
 class ListFilesTool(BaseTool):
     name: str = "list_files"
     description: str = "List all files in the workspace directory"
+    args_schema: None = None
     
     def _run(self, tool_input: str = "") -> str:
         """List all files in the workspace directory."""
@@ -538,6 +539,50 @@ class TaskConfig(BaseModel):
     context: Optional[Dict[str, Any]] = Field(default=None, description="Additional context for the task")
     
     model_config = {"extra": "forbid"}
+
+def create_task_configs(task_description: str) -> List[TaskConfig]:
+    """Create dynamic task configurations based on the user's task description."""
+    return [
+        TaskConfig(
+            description=f"""Implement the following task: {task_description}
+
+            Requirements:
+            1. Analyze the task requirements
+            2. Create necessary files in the workspace directory
+            3. Implement the required functionality
+            4. Include proper error handling and cleanup
+            5. Follow best practices and coding standards
+            
+            Available tools:
+            - write_file: Use this to write files (parameters: filename, content)
+            - read_file: Use this to read files (parameters: filename)
+            - list_files: Use this to list workspace files (no parameters)
+            
+            The workspace directory is: {WORKSPACE_DIR}""",
+            agent_role='Software Developer'
+        ),
+        TaskConfig(
+            description=f"""Review and verify the implementation for: {task_description}
+            
+            Requirements:
+            1. Review all created/modified files
+            2. Verify code quality and best practices
+            3. Check error handling and cleanup
+            4. Ensure code is well-documented
+            5. Write a review summary
+            
+            Available tools:
+            - read_file: Use this to read files (parameters: filename)
+            - write_file: Use this to write review (parameters: filename, content)
+            - list_files: Use this to list workspace files (no parameters)
+            
+            Steps:
+            1. List and read all relevant files
+            2. Review the implementation
+            3. Write review.txt with your findings""",
+            agent_role='Code Reviewer'
+        )
+    ]
 
 def wait_for_ollama(base_url: str, timeout: int = 30, interval: int = 2) -> bool:
     """Wait for Ollama server to be ready"""
@@ -577,67 +622,20 @@ llm = Ollama(
 # Define agent configurations
 agent_configs = [
     AgentConfig(
-        role='Software Architect',
-        goal='Design and plan software architecture',
-        backstory="""Expert software architect with extensive experience in system design.
-        Focuses on creating clean, maintainable, and well-structured applications.
-        Proficient in various design patterns and best practices."""
-    ),
-    AgentConfig(
         role='Software Developer',
         goal='Implement high-quality code',
         backstory="""Senior developer with strong coding skills and attention to detail.
+        Expert in multiple programming languages and frameworks.
         Writes clean, efficient, and well-documented code.
-        Expert in implementing robust error handling and testing."""
+        Focuses on implementing robust error handling and testing."""
     ),
     AgentConfig(
         role='Code Reviewer',
         goal='Ensure code quality and best practices',
         backstory="""Experienced code reviewer with a keen eye for detail.
-        Ensures code meets quality standards, follows best practices, and is well-tested.
-        Expert in identifying potential issues and suggesting improvements."""
-    )
-]
-
-# Define task configurations
-task_configs = [
-    TaskConfig(
-        description=f"""Create a Python script that can activate and display the Mac camera feed.
-
-        Requirements:
-        1. Create a file named 'mac_camera.py' in the workspace directory
-        2. Use OpenCV (cv2) for camera access
-        3. Include proper error handling and cleanup
-        4. Add graceful shutdown with Ctrl+C
-        5. Follow PEP 8 style guidelines
-        
-        Available tools:
-        - write_file: Use this to write the file (parameters: filename, content)
-        - read_file: Use this to read files (parameters: filename)
-        - list_files: Use this to list workspace files (no parameters)
-        
-        The workspace directory is: {WORKSPACE_DIR}""",
-        agent_role='Software Developer'
-    ),
-    TaskConfig(
-        description=f"""Review and verify the mac_camera.py implementation.
-        
-        Requirements:
-        1. Read the mac_camera.py file
-        2. Verify it follows PEP 8 guidelines
-        3. Check for proper error handling
-        4. Verify camera cleanup on exit
-        5. Write a review summary
-        
-        Available tools:
-        - read_file: Use this to read the file (parameters: filename)
-        - write_file: Use this to write review (parameters: filename, content)
-        
-        Steps:
-        1. Use read_file tool to read mac_camera.py
-        2. Review the implementation
-        3. Use write_file tool to write camera_review.txt with your findings""",
-        agent_role='Code Reviewer'
+        Ensures code meets quality standards and follows best practices.
+        Expert in identifying potential issues and suggesting improvements.
+        Focuses on code readability, maintainability, and performance."""
     )
 ]
 
@@ -654,6 +652,9 @@ for config in agent_configs:
         tools=tools
     )
     agents.append(agent)
+
+# Create dynamic tasks based on user's description
+task_configs = create_task_configs(task_description)
 
 # Create tasks
 tasks = []
