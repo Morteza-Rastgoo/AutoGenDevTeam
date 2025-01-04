@@ -242,7 +242,7 @@ setup_tunnel() {
         echo "Waiting for tunnel to be ready..."
         for i in {1..10}; do
             if nc -z localhost "${OLLAMA_LOCAL_PORT}" 2>/dev/null; then
-                echo "Tunnel established successfully"
+        echo "Tunnel established successfully"
                 return 0
             fi
             sleep 1
@@ -386,7 +386,7 @@ ensure_ollama() {
                 # Test connection again
                 if ! curl -s "$base_url/version" >/dev/null; then
                     echo "Error: Failed to connect to Ollama server"
-                    exit 1
+        exit 1
                 fi
             fi
             
@@ -395,9 +395,9 @@ ensure_ollama() {
             if ! ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama list" | grep -q "$OLLAMA_MODEL"; then
                 echo "Pulling $OLLAMA_MODEL on remote host..."
                 ssh -i "$OLLAMA_SSH_KEY" "$OLLAMA_REMOTE_USER@$OLLAMA_REMOTE_HOST" "ollama pull $OLLAMA_MODEL"
-            fi
-            
-            export OLLAMA_BASE_URL="$base_url"
+    fi
+    
+    export OLLAMA_BASE_URL="$base_url"
             ;;
         *)
             echo "Invalid Ollama mode: $mode"
@@ -470,8 +470,8 @@ class ReadFileInput(BaseModel):
 
 # Define file tools
 class WriteFileTool(BaseTool):
-    name = "write_file"
-    description = "Write content to a file in the workspace directory"
+    name: str = "write_file"
+    description: str = "Write content to a file in the workspace directory"
     args_schema = WriteFileInput
     
     def _run(self, filename: str, content: str) -> str:
@@ -488,8 +488,8 @@ class WriteFileTool(BaseTool):
         raise NotImplementedError("Async not implemented")
 
 class ReadFileTool(BaseTool):
-    name = "read_file"
-    description = "Read content from a file in the workspace directory"
+    name: str = "read_file"
+    description: str = "Read content from a file in the workspace directory"
     args_schema = ReadFileInput
     
     def _run(self, filename: str) -> str:
@@ -505,8 +505,8 @@ class ReadFileTool(BaseTool):
         raise NotImplementedError("Async not implemented")
 
 class ListFilesTool(BaseTool):
-    name = "list_files"
-    description = "List all files in the workspace directory"
+    name: str = "list_files"
+    description: str = "List all files in the workspace directory"
     
     def _run(self, tool_input: str = "") -> str:
         """List all files in the workspace directory."""
@@ -552,130 +552,132 @@ def wait_for_ollama(base_url: str, timeout: int = 30, interval: int = 2) -> bool
         time.sleep(interval)
     return False
 
-def handle_exit(signum, frame):
-    print(colored("\nGracefully shutting down...", "yellow"))
-    sys.exit(0)
+# Get task message from command line argument
+task_description = sys.argv[1]
 
-signal.signal(signal.SIGINT, handle_exit)
-signal.signal(signal.SIGTERM, handle_exit)
+# Setup Ollama configuration
+base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+model = os.getenv("OLLAMA_MODEL", "llama2")
 
-def create_mvp_agents(llm):
-    """Create agents optimized for MVP development"""
-    return [
-        Agent(
-            role='Tech Lead',
-            goal='Design and oversee MVP development',
-            backstory="""Experienced tech lead focused on rapid MVP development.
-            Expert in breaking down complex requirements into minimal viable solutions.
-            Ensures the team delivers working code quickly while maintaining essential quality.""",
-            verbose=True,
-            allow_delegation=True,
-            llm=llm,
-            tools=tools
-        ),
-        Agent(
-            role='Full Stack Developer',
-            goal='Implement core MVP features',
-            backstory="""Efficient full-stack developer specialized in MVP development.
-            Expert in choosing the right tools and frameworks for rapid development.
-            Focuses on implementing core features that demonstrate product value.""",
-            verbose=True,
-            allow_delegation=False,
-            llm=llm,
-            tools=tools
-        ),
-        Agent(
-            role='QA Engineer',
-            goal='Ensure MVP functionality',
-            backstory="""Pragmatic QA engineer focused on critical path testing.
-            Ensures core MVP features work as expected.
-            Balances speed with quality, focusing on must-have functionality.""",
-            verbose=True,
-            allow_delegation=False,
-            llm=llm,
-            tools=tools
-        )
-    ]
+# Wait for Ollama to be ready
+print(colored("\nChecking Ollama connection...", "yellow"))
+if not wait_for_ollama(base_url):
+    print(colored("Error: Could not connect to Ollama server", "red"))
+    sys.exit(1)
 
-def create_mvp_task(description: str, agent_role: str) -> Task:
-    """Create a task optimized for MVP development"""
-    return Task(
-        description=f"""Focus on MVP implementation for: {description}
+# Initialize Ollama LLM with streaming
+llm = Ollama(
+    base_url=base_url,
+    model=model,
+    callbacks=[StreamingStdOutCallbackHandler()],
+    temperature=0.5,
+    timeout=120
+)
 
-        Guidelines:
-        1. Start with the simplest working solution
-        2. Focus on core functionality first
-        3. Use established libraries and frameworks
-        4. Implement basic error handling
-        5. Write minimal but sufficient documentation
-        6. Create basic tests for critical paths
+# Define agent configurations
+agent_configs = [
+    AgentConfig(
+        role='Software Architect',
+        goal='Design and plan software architecture',
+        backstory="""Expert software architect with extensive experience in system design.
+        Focuses on creating clean, maintainable, and well-structured applications.
+        Proficient in various design patterns and best practices."""
+    ),
+    AgentConfig(
+        role='Software Developer',
+        goal='Implement high-quality code',
+        backstory="""Senior developer with strong coding skills and attention to detail.
+        Writes clean, efficient, and well-documented code.
+        Expert in implementing robust error handling and testing."""
+    ),
+    AgentConfig(
+        role='Code Reviewer',
+        goal='Ensure code quality and best practices',
+        backstory="""Experienced code reviewer with a keen eye for detail.
+        Ensures code meets quality standards, follows best practices, and is well-tested.
+        Expert in identifying potential issues and suggesting improvements."""
+    )
+]
+
+# Define task configurations
+task_configs = [
+    TaskConfig(
+        description=f"""Create a Python script that can activate and display the Mac camera feed.
+
+        Requirements:
+        1. Create a file named 'mac_camera.py' in the workspace directory
+        2. Use OpenCV (cv2) for camera access
+        3. Include proper error handling and cleanup
+        4. Add graceful shutdown with Ctrl+C
+        5. Follow PEP 8 style guidelines
         
         Available tools:
-        - write_file: Create/update files
-        - read_file: Read file contents
-        - list_files: List workspace files
+        - write_file: Use this to write the file (parameters: filename, content)
+        - read_file: Use this to read files (parameters: filename)
+        - list_files: Use this to list workspace files (no parameters)
         
-        Workspace directory: {WORKSPACE_DIR}""",
-        agent=next(a for a in agents if a.role == agent_role)
+        The workspace directory is: {WORKSPACE_DIR}""",
+        agent_role='Software Developer'
+    ),
+    TaskConfig(
+        description=f"""Review and verify the mac_camera.py implementation.
+        
+        Requirements:
+        1. Read the mac_camera.py file
+        2. Verify it follows PEP 8 guidelines
+        3. Check for proper error handling
+        4. Verify camera cleanup on exit
+        5. Write a review summary
+        
+        Available tools:
+        - read_file: Use this to read the file (parameters: filename)
+        - write_file: Use this to write review (parameters: filename, content)
+        
+        Steps:
+        1. Use read_file tool to read mac_camera.py
+        2. Review the implementation
+        3. Use write_file tool to write camera_review.txt with your findings""",
+        agent_role='Code Reviewer'
     )
+]
 
-# Main loop
-print(colored("\nStarting DevTeam in continuous mode...", "green"))
-print(colored("Press Ctrl+C to exit\n", "yellow"))
+# Create agents
+agents = []
+for config in agent_configs:
+    agent = Agent(
+        role=config.role,
+        goal=config.goal,
+        backstory=config.backstory,
+        verbose=config.verbose,
+        allow_delegation=config.allow_delegation,
+        llm=llm,
+        tools=tools
+    )
+    agents.append(agent)
 
-while True:
-    try:
-        # Setup Ollama
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        model = os.getenv("OLLAMA_MODEL", "llama2")
-        
-        if not wait_for_ollama(base_url):
-            print(colored("Error: Could not connect to Ollama server", "red"))
-            time.sleep(5)
-            continue
-            
-        llm = Ollama(
-            base_url=base_url,
-            model=model,
-            callbacks=[StreamingStdOutCallbackHandler()],
-            temperature=0.5,
-            timeout=120
+# Create tasks
+tasks = []
+for config in task_configs:
+    agent = next((a for a in agents if a.role == config.agent_role), None)
+    if agent:
+        task = Task(
+            description=config.description,
+            agent=agent
         )
-        
-        # Create MVP-focused agents
-        agents = create_mvp_agents(llm)
-        
-        # Get task from command line
-        task_msg = sys.argv[1] if len(sys.argv) > 1 else input(colored("Enter task description: ", "cyan"))
-        
-        # Create MVP-focused task for tech lead
-        task = create_mvp_task(task_msg, 'Tech Lead')
-        
-        # Create and run crew
-        crew = Crew(
-            agents=agents,
-            tasks=[task],
-            verbose=2,
-            process=Process.sequential
-        )
-        
-        # Execute task
-        print(colored(f"\nWorking on task: {task_msg}\n", "green"))
-        result = crew.kickoff()
-        print(colored("\nTask completed!", "green"))
-        print("Result:", result)
-        
-        # Wait for next task
-        time.sleep(1)
-        print(colored("\nReady for next task...", "cyan"))
-        
-    except KeyboardInterrupt:
-        print(colored("\nGracefully shutting down...", "yellow"))
-        sys.exit(0)
-    except Exception as e:
-        print(colored(f"\nError: {str(e)}", "red"))
-        print(colored("Retrying in 5 seconds...", "yellow"))
-        time.sleep(5)
+        tasks.append(task)
+
+# Create and run crew
+crew = Crew(
+    agents=agents,
+    tasks=tasks,
+    verbose=2,
+    process=Process.sequential
+)
+
+# Execute the task
+result = crew.kickoff()
+print("\nTask execution completed!")
+print("Result:", result)
 
 EOF
 }
