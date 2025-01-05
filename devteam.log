@@ -3090,3 +3090,28 @@ Explanation:
 * `content`: The content of the file to be created, which is a string containing the Python code `print('Hello, World!')` in this case.
 
 Note that the schema is structured as a JSON object, with each key representing a property of the tool or its arguments, and each value representing the corresponding value.
+Checking Ollama connection...
+
+Checking Ollama connection...
+
+[1;31mProvider List: https://docs.litellm.ai/docs/providers[0m
+
+
+[1;31mProvider List: https://docs.litellm.ai/docs/providers[0m
+
+
+Checking Ollama connection...
+
+[1;31mProvider List: https://docs.litellm.ai/docs/providers[0m
+
+
+[1;31mProvider List: https://docs.litellm.ai/docs/providers[0m
+
+
+Checking Ollama connection...
+
+[1;31mProvider List: https://docs.litellm.ai/docs/providers[0m
+
+
+[1;31mProvider List: https://docs.litellm.ai/docs/providers[0m
+
