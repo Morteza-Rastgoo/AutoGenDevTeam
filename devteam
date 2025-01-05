@@ -437,19 +437,48 @@ setup_local_ollama() {
 FROM deepseek-coder
 
 # Optimize for coding tasks
-PARAMETER temperature 0.3
-PARAMETER top_p 0.95
+PARAMETER temperature 0.2
+PARAMETER top_p 0.8
 PARAMETER top_k 40
-PARAMETER num_ctx 16384
+PARAMETER num_ctx 32768
+PARAMETER num_gpu 99
+PARAMETER num_thread 8
+PARAMETER repeat_penalty 1.1
+PARAMETER repeat_last_n 64
+PARAMETER num_predict 2048
 PARAMETER stop "<|endoftext|>"
 PARAMETER stop "```"
+PARAMETER stop "Human:"
+PARAMETER stop "Assistant:"
 
 # System prompt optimization
 SYSTEM """You are an expert software developer with deep knowledge of multiple programming languages, frameworks, and best practices.
-Focus on writing clean, efficient, and well-documented code.
-Always include proper error handling, input validation, and resource cleanup.
-Follow language-specific conventions and best practices.
-When reviewing code, be thorough and provide constructive feedback."""
+Your primary focus is on writing production-quality code that is:
+1. Clean, efficient, and well-documented
+2. Properly handles errors and edge cases
+3. Follows language-specific conventions and best practices
+4. Includes comprehensive input validation
+5. Manages resources properly with cleanup
+6. Uses appropriate design patterns
+7. Optimized for performance and security
+
+When implementing solutions:
+- Write modular, reusable code
+- Include detailed comments and documentation
+- Add proper error messages and logging
+- Use type hints and docstrings
+- Consider memory usage and optimization
+- Follow security best practices
+- Include unit tests where appropriate
+
+When reviewing code:
+- Check for potential bugs and vulnerabilities
+- Verify error handling and resource management
+- Assess code organization and maintainability
+- Validate documentation completeness
+- Look for performance optimizations
+- Ensure security best practices
+- Provide detailed, actionable feedback"""
 EOF
         ollama create deepseek-coder-optimized /tmp/modelfile
         rm /tmp/modelfile
@@ -656,13 +685,17 @@ llm = ChatOllama(
     base_url=base_url,
     model=model,
     callbacks=[StreamingStdOutCallbackHandler()],
-    temperature=0.3,  # Lower temperature for more focused code generation
-    timeout=120,
-    num_ctx=16384,  # Larger context window for code
-    top_p=0.95,
-    top_k=40,
-    repeat_penalty=1.1,  # Reduce repetition in generated code
-    num_predict=2048  # Increase max tokens for longer code generation
+    temperature=0.2,  # Lower temperature for more precise code generation
+    timeout=300,  # Longer timeout for complex tasks
+    num_ctx=32768,  # Larger context window for code
+    num_gpu=99,  # Use all available GPUs
+    num_thread=8,  # Optimal thread count for most systems
+    top_p=0.8,  # More focused sampling
+    top_k=40,  # Keep reasonable number of tokens
+    repeat_penalty=1.1,  # Reduce repetition
+    repeat_last_n=64,  # Consider more context for repetition penalty
+    num_predict=2048,  # Increase max tokens for longer code generation
+    stop=["<|endoftext|>", "```", "Human:", "Assistant:"]  # Stop tokens for cleaner output
 )
 
 # Define agent configurations
