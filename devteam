@@ -746,14 +746,16 @@ for config in task_configs:
             description=config.description,
             expected_output="A detailed report of the completed task including any files created or modified.",
             agent=agent,
-            context={
-                "workspace_dir": WORKSPACE_DIR,
-                "tools_available": [
-                    "write_file: Write content to files",
-                    "read_file: Read content from files",
-                    "list_files: List workspace files"
-                ]
-            }
+            tools=tools,
+            async_execution=False,
+            output_file=None,
+            context_supplement=[
+                f"Workspace directory: {WORKSPACE_DIR}",
+                "Available tools:",
+                "- write_file: Create or update files (parameters: filename, content)",
+                "- read_file: Read file contents (parameters: filename)",
+                "- list_files: List workspace files (no parameters)"
+            ]
         )
         tasks.append(task)
 
